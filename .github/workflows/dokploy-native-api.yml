@@ -1,0 +1,46 @@
+name: Dokploy native API test
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: dokploy-native-api
+  cancel-in-progress: false
+
+jobs:
+  native-api:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Fetch only the public test source anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_REPOSITORY" = NexaFlowFrance/openfamily-catalog-tests
+          git -c credential.helper= clone --quiet --no-checkout \
+            https://github.com/NexaFlowFrance/openfamily-catalog-tests.git \
+            "$RUNNER_TEMP/openfamily-catalog-tests"
+          git -C "$RUNNER_TEMP/openfamily-catalog-tests" -c credential.helper= \
+            fetch --quiet --depth 1 origin "$GITHUB_SHA"
+          git -C "$RUNNER_TEMP/openfamily-catalog-tests" checkout --quiet --detach "$GITHUB_SHA"
+      - name: Check disposable VM resources and install pinned Dokploy privately
+        working-directory: ${{ runner.temp }}/openfamily-catalog-tests
+        run: bash ci/install-native.sh
+      - name: Import, deploy, route, restart and preserve data through native APIs
+        working-directory: ${{ runner.temp }}/openfamily-catalog-tests
+        run: python3 ci/native_api_test.py
+      - name: Remove only this test's services in the disposable VM
+        if: always()
+        working-directory: ${{ runner.temp }}/openfamily-catalog-tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = NexaFlowFrance/openfamily-catalog-tests
+          docker service rm dokploy dokploy-postgres >/dev/null 2>&1 || true
+          docker rm -f dokploy-traefik >/dev/null 2>&1 || true
+          # The VM and its generated volumes/secrets are destroyed by GitHub after the job.
