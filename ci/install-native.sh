@@ -25,7 +25,7 @@ if (( free_bytes < minimum )); then
 fi
 printf 'PREFLIGHT PASS: free disk bytes=%s; required=%s; fresh standard ubuntu-24.04 VM.\n' "$free_bytes" "$minimum"
 
-for command in docker curl jq python3 openssl nsenter iptables; do command -v "$command" >/dev/null; done
+for command in docker curl jq python3 openssl nsenter iptables ip6tables; do command -v "$command" >/dev/null; done
 [[ "$(awk '/MemTotal/{print $2}' /proc/meminfo)" -ge 2097152 ]]
 
 # Images are downloaded by the VM's Docker daemon; no registry login or token.
@@ -96,13 +96,18 @@ sudo nsenter -t "$controller_pid" -n iptables -I OUTPUT 1 -j OPENFAMILY_CI_EGRES
 sudo nsenter -t "$controller_pid" -n iptables -A OPENFAMILY_CI_EGRESS -d 127.0.0.11/32 -j REJECT
 sudo nsenter -t "$controller_pid" -n iptables -A OPENFAMILY_CI_EGRESS -d 127.0.0.0/8 -j RETURN
 sudo nsenter -t "$controller_pid" -n iptables -A OPENFAMILY_CI_EGRESS -d "$overlay_subnet" -j RETURN
-sudo nsenter -t "$controller_pid" -n iptables -A OPENFAMILY_CI_EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
 sudo nsenter -t "$controller_pid" -n iptables -A OPENFAMILY_CI_EGRESS -j REJECT
+sudo nsenter -t "$controller_pid" -n ip6tables -N OPENFAMILY_CI_EGRESS6
+sudo nsenter -t "$controller_pid" -n ip6tables -I OUTPUT 1 -j OPENFAMILY_CI_EGRESS6
+sudo nsenter -t "$controller_pid" -n ip6tables -A OPENFAMILY_CI_EGRESS6 -d ::1/128 -j RETURN
+sudo nsenter -t "$controller_pid" -n ip6tables -A OPENFAMILY_CI_EGRESS6 -j REJECT
 # No outbound probe is sent: the rules are checked locally in this namespace.
 sudo nsenter -t "$controller_pid" -n iptables -C OUTPUT -j OPENFAMILY_CI_EGRESS
 sudo nsenter -t "$controller_pid" -n iptables -C OPENFAMILY_CI_EGRESS -j REJECT
+sudo nsenter -t "$controller_pid" -n ip6tables -C OUTPUT -j OPENFAMILY_CI_EGRESS6
+sudo nsenter -t "$controller_pid" -n ip6tables -C OPENFAMILY_CI_EGRESS6 -j REJECT
 printf '%s' "$controller" > .controller-id
-echo 'PRIVACY PASS: controller unpublished; external controller egress blocked before signup.'
+echo 'PRIVACY PASS: controller unpublished; IPv4/IPv6 external controller egress blocked before signup.'
 
 [[ -s /etc/dokploy/traefik/traefik.yml ]]
 docker run -d --name dokploy-traefik --restart always \
