@@ -50,8 +50,8 @@ def controller_id():
     return ids[0]
 
 
-def controller_request(path, method='GET', payload=None, key=False):
-    args = ['docker', 'exec', '-i', controller_id(), 'curl', '--silent', '--show-error', '--max-time', '120',
+def controller_request(path, method='GET', payload=None, key=False, timeout=120):
+    args = ['docker', 'exec', '-i', controller_id(), 'curl', '--silent', '--show-error', '--max-time', str(timeout),
             '-w', '\n%{http_code}', '-b', '/tmp/openfamily-ci.cookies', '-c', '/tmp/openfamily-ci.cookies',
             '-H', 'Content-Type: application/json', '-H', 'Origin: http://localhost:3000']
     if key:
@@ -62,7 +62,10 @@ def controller_request(path, method='GET', payload=None, key=False):
         args += ['--data-binary', '@-']
         data = json.dumps(payload)
     args += ['http://localhost:3000' + path]
-    raw = command(args, data)
+    try:
+        raw = command(args, data)
+    except Failure:
+        raise Failure(f'Native API {path.split("?")[0]} transport failed; raw response withheld.') from None
     try:
         body, status = raw.rsplit('\n', 1)
         status = int(status)
@@ -177,8 +180,10 @@ def main():
     app_password = secrets.token_urlsafe(32)
     mask(platform_password)
     mask(app_password)
+    # Dokploy's first-user hook tries public IPv4 then IPv6 sequentially. With
+    # all external traffic blocked, its DNS/HTTPS timeouts can total ~160s.
     controller_request('/api/auth/sign-up/email', 'POST', {'email': fake_email, 'password': platform_password,
-                       'name': 'Test', 'lastName': 'Family'})
+                       'name': 'Test', 'lastName': 'Family'}, timeout=360)
     controller_request('/api/auth/sign-in/email', 'POST', {'email': fake_email, 'password': platform_password})
     session = trpc('user.session')
     organization = session['session']['activeOrganizationId']
@@ -214,6 +219,7 @@ def main():
     api('compose.deploy', {'composeId': compose_id, 'freshVolumes': False})
     wait_for(lambda: app_request(host, '/health')[0] == 200, 'native routed application health')
     cid_before = wait_for(lambda: app_cid(project_name), 'native application container')
+    image_before = command(['docker', 'inspect', cid_before, '--format', '{{.Image}}'])
     volume_before = data_volume(cid_before)
     for path in ('/', '/calendar'):
         status, body = app_request(host, path)
@@ -263,6 +269,8 @@ def main():
     wait_for(lambda: app_request(host, '/health')[0] == 200, 'health after replacement')
     if data_volume(new_cid) != volume_before:
         raise Failure('Native replacement did not preserve the data volume.')
+    if command(['docker', 'inspect', new_cid, '--format', '{{.Image}}']) != image_before:
+        raise Failure('Native same-version redeploy changed the effective image unexpectedly.')
     check_me(host, token, fake_email)
     mark('native_redeploy_replaced_container_same_volume_account_and_session')
 
