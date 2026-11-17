@@ -3,6 +3,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import sys
@@ -40,6 +41,22 @@ def mask(value):
         print('::add-mask::' + str(value), flush=True)
 
 
+def safe_api_error(body):
+    """Only a bounded, redacted error message; never auth bodies, stacks or SQL."""
+    try:
+        error = json.loads(body).get('error', {})
+        error = error.get('json', error)
+        message = error.get('message', '')
+        if not isinstance(message, str) or not message or len(message) > 300:
+            return 'error detail withheld'
+        if re.search(r'(?i)select |insert |update |delete |password|secret|cookie|authorization|token|api.key', message):
+            return 'sensitive error detail withheld'
+        message = re.sub(r'\S+@\S+|\b(?:\d{1,3}\.){3}\d{1,3}\b|[A-Za-z0-9_+/=-]{24,}', '[redacted]', message)
+        return ' '.join(message.split())
+    except (ValueError, TypeError, AttributeError):
+        return 'error detail withheld'
+
+
 def controller_id():
     ids = command(['docker', 'ps', '-q', '--filter', 'label=com.docker.swarm.service.name=dokploy']).splitlines()
     if len(ids) != 1:
@@ -72,7 +89,7 @@ def controller_request(path, method='GET', payload=None, key=False, timeout=120)
     except ValueError:
         raise Failure('Controller returned an invalid HTTP response.') from None
     if not 200 <= status < 300:
-        raise Failure(f'Native API {path.split("?")[0]} returned HTTP {status}; raw response withheld.')
+        raise Failure(f'Native API {path.split("?")[0]} returned HTTP {status}: {safe_api_error(body)}; raw response withheld.')
     try:
         result = json.loads(body)
     except json.JSONDecodeError:
@@ -174,6 +191,10 @@ def main():
     if not bindings or any(x.get('HostIp') != '127.0.0.1' for rows in bindings.values() for x in rows):
         raise Failure('Traefik is not restricted to loopback.')
     mark('private_native_controller_and_loopback_proxy')
+    compose_version = command(['docker', 'exec', controller, 'docker', 'compose', 'version', '--short'])
+    if not re.fullmatch(r'v?\d+\.\d+\.\d+', compose_version):
+        raise Failure('Unexpected controller Docker Compose version format.')
+    print('Controller Docker Compose version: ' + compose_version, flush=True)
 
     fake_email = 'openfamily-ci-' + os.environ.get('GITHUB_RUN_ID', 'local') + '@example.invalid'
     platform_password = secrets.token_urlsafe(32)
@@ -187,7 +208,10 @@ def main():
     controller_request('/api/auth/sign-in/email', 'POST', {'email': fake_email, 'password': platform_password})
     session = trpc('user.session')
     organization = session['session']['activeOrganizationId']
-    key_result = trpc('user.createApiKey', {'name': 'Disposable native test', 'expiresIn': 3600,
+    mark('synthetic_bootstrap_and_session')
+    # Better Auth's supported minimum is one day; this synthetic key is still
+    # destroyed with the VM at the end of this job.
+    key_result = trpc('user.createApiKey', {'name': 'Disposable native test', 'expiresIn': 86400,
                        'rateLimitEnabled': False, 'metadata': {'organizationId': organization}}, post=True)
     key = key_result['key']
     mask(key)
